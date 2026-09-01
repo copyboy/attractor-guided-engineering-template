@@ -47,6 +47,26 @@ each rule is imperative and points at a concrete file or command.
 
 ## L007 — Verify host RAM headroom before long DEEP_AUDIT runs; residents (IntelliJ/Docker) can starve the loop
 - **Rule:** Before launching a mission whose roadmap includes DEEP_AUDIT, ensure ≥2 GB free RAM (close IntelliJ/Docker). The run loop logs `freeMemGB` per heartbeat — sustained values <0.5 GB risk slowdown/OOM on large audit corpora even though individual agent node processes (~0.6 GB RSS) fit. Treat low `freeMemGB` as a preflight signal, not a per-step failure.
-- **Origin:** ENV/TOOL   **Severity:** SEV3   **count:** 1   **last_seen:** 2026-08-04
-- **Evidence:** `etd-age/tools/mission-driver/docs/postmortems/2026-08-04-docs-deepening-and-optimization-proposals-postmortem.md` F3 — `sys-snapshot.csv` freeGB 0.2 at START and through all of DEEP_AUDIT (memPressure 48–53%); ideaMB ~2.6–3.3 GB + dockerMB ~1.6–1.9 GB dominant; agent node ~0.6 GB; no OOM only because each step fit.
+- **Origin:** ENV/TOOL   **Severity:** SEV3   **count:** 2   **last_seen:** 2026-09-01
+- **Evidence:** `etd-age/tools/mission-driver/docs/postmortems/2026-08-04-docs-deepening-and-optimization-proposals-postmortem.md` F3 — `sys-snapshot.csv` freeGB 0.2 at START and through all of DEEP_AUDIT (memPressure 48–53%); ideaMB ~2.6–3.3 GB + dockerMB ~1.6–1.9 GB dominant; agent node ~0.6 GB; no OOM only because each step fit. Recurred `app_starter/tools/mission-driver/docs/postmortems/2026-09-01-starter-postmortem.md` §5 — freeGB 0.2–0.6 through a 7h48m run (memPressure 42–50%), no OOM attribution.
 - **Fix target:** `TROUBLESHOOTING.md` (add a ≥2 GB free-RAM preflight entry before DEEP_AUDIT); optionally `src/main.js` run launcher — warn (not abort) at run start when free RAM is below threshold.
+
+---
+
+## L008 — Give held (human-gated) plans a `held` terminal outcome; never let them ride the fail→retry cycle
+- **Rule:** When a plan's frontmatter is `status: held` (or its next item is an ask-first human gate with no recorded decision), EXECUTE must emit `<AI_STEP_RESULT>held</AI_STEP_RESULT>` immediately — no re-verification battery — and the flow must terminate the subflow as `blocked` instead of retrying. Never dispatch BUILD_VERIFY's full command battery for a plan known to be held; never let BUILD_VERIFY's build-health pass mark a subflow `completed` while plan items remain unchecked.
+- **Origin:** FLOW   **Severity:** SEV1   **count:** 1   **last_seen:** 2026-09-01
+- **Evidence:** `app_starter/tools/mission-driver/docs/postmortems/2026-09-01-starter-postmortem.md` F1 — 20 EXECUTE fail-visits + 14 `max_retries` limit hits across 3 human gates (~2h cycling of a 7h48m run); `oc-BUILD_VERIFY-1788239388517-4eqygw.log` ran the full 4-command battery green then honestly failed for a held 0/28 plan; subflow 2-1 "completed" via BUILD_VERIFY pass with 17 unchecked items, deferring real completion to the next 3h40m round.
+- **Fix target:** `flows/plan-execution.json` (add `"held": { "done": "blocked" }` to EXECUTE and BUILD_VERIFY) + `prompts/execute.md` / `prompts/build-verify.md` (emit `held` marker, skip battery) + `src/engine.js` (accept `held` in the marker vocabulary, surface subflow `blocked`).
+
+## L009 — Fail fast (or warn loudly) when DEEP_AUDIT runs with no audit prompts configured
+- **Rule:** Before launching a mission with `maxAuditRounds > 0`, verify `multiAuditPrompt`/`openAuditPrompt` are non-empty; if both are empty the deep-audit round audits NOTHING while still consuming a round and producing a clean-looking `audit_gate` exit. Warn at run start or refuse to count vacuous audit rounds.
+- **Origin:** FLOW   **Severity:** SEV2   **count:** 1   **last_seen:** 2026-09-01
+- **Evidence:** `app_starter/tools/mission-driver/docs/postmortems/2026-09-01-starter-postmortem.md` F3 — `events.jsonl` `step_skipped` MULTI_AUDIT + OPEN_AUDIT `"reason":"when condition false"`; `flows/deep-audit-loop.json` gates both on `multiAuditPrompt != ''` / `openAuditPrompt != ''`; `missions/starter.json` defines neither — audit round 1/3 was a 3 ms no-op and the roadmap closed on DRAFT_PLANS self-assessment alone.
+- **Fix target:** `src/main.js` (run-start validation: `maxAuditRounds > 0` ∧ both audit prompts empty → loud warning or fail fast); alternatively ship default audit prompts in `missions/base.json`.
+
+## L010 — Never run concurrent missions against a digest-pinned baseline sharing one Maven localRepository
+- **Rule:** If a mission's gate pins digests of installed upstream artifacts (e.g. compliance R4), do not run another mission (or any `mvn install` of a different vintage) against the same `localRepository` concurrently — it silently overwrites pinned artifacts and red-lines the gate until a human re-adjudicates. Isolate per mission (`-Dmaven.repo.local`) or serialize missions on the host.
+- **Origin:** ENV/TOOL   **Severity:** SEV2   **count:** 1   **last_seen:** 2026-09-01
+- **Evidence:** `app_starter/tools/mission-driver/docs/postmortems/2026-09-01-starter-postmortem.md` F2 — `oc-CLOSURE_AUDIT-1788253482524-o8wytd.log`: "R4 fails with the exact same 7 digest mismatches … (external localRepository pollution by the parallel onerx mission)"; blocked M6-WI3's last 2 items ~55 min until human adjudication commit `da88420`.
+- **Fix target:** `TROUBLESHOOTING.md` (concurrent-mission localRepository isolation entry); operationally, per-mission `-Dmaven.repo.local` in mission `commands`.
